@@ -1,0 +1,45 @@
+# Validates that pull request titles follow the Conventional Commits spec
+# (https://www.conventionalcommits.org), using the shared rules in
+# Merkleye/github-templates so the allowed type list is maintained once for
+# every Merkleye repo.
+#
+# This is the only Merkleye template that applies to this repo. It is a fork
+# of reloading01/certstream-server-rust: ci.yml is upstream's, it publishes
+# to ghcr.io/reloading01 rather than Merkleye's GHCR, and it pushes to
+# upstream's homebrew tap and package repositories. There is nothing
+# Merkleye-authored here to deduplicate, so the container-preview and
+# Cloudflare templates have nothing to attach to.
+#
+# ignore-labels: a sync from upstream carries upstream's commit subjects,
+# which do not follow this convention and should not be rewritten -- the
+# whole point of the branch is that it mirrors. Label such a PR `upstream`
+# and this check stands aside; everything else still goes through it.
+#
+# pull_request, not pull_request_target: the latter reads the workflow file
+# from the base branch, so a workflow that exists only on a PR branch never
+# runs at all -- this PR would get no signal from the very thing it adds.
+# Nothing here checks out or executes PR code, so both are safe.
+#
+# `edited` matters: without it, fixing a rejected title never re-runs the
+# check and the PR stays red.
+name: PR Title
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    permissions:
+      pull-requests: read
+    uses: Merkleye/github-templates/.github/workflows/pr-title.yml@main
+    with:
+      ignore-labels: |
+        upstream
