@@ -20,6 +20,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM alpine:3.21
 
+ARG OCI_VERSION=0.0.0
+ARG OCI_REVISION=unknown
+ARG OCI_CREATED=unknown
+ARG OCI_REF_NAME=dev
+ARG OCI_SOURCE=https://github.com/merkleye/certstream-server
+
+LABEL org.opencontainers.image.title="Merkleye certstream-server" \
+      org.opencontainers.image.description="Unfiltered Certificate Transparency firehose (certstream-server-rust)" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.url="${OCI_SOURCE}" \
+      org.opencontainers.image.version="${OCI_VERSION}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.ref.name="${OCI_REF_NAME}"
+
 RUN apk add --no-cache ca-certificates curl
 
 COPY --from=builder /usr/local/bin/certstream-server-rust /usr/local/bin/

@@ -2,7 +2,7 @@
 
 A Certstream server written in Rust. It monitors Certificate Transparency (CT) logs and streams newly issued SSL/TLS certificates over WebSocket and Server-Sent Events (SSE).
 
-[![GHCR](https://img.shields.io/badge/ghcr.io-reloading01%2Fcertstream--server--rust-blue?logo=github)](https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust)
+[![GHCR](https://img.shields.io/badge/ghcr.io-merkleye%2Fcertstream--server-blue?logo=github)](https://github.com/merkleye/certstream-server/pkgs/container/certstream-server)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4?logo=githubsponsors)](https://github.com/sponsors/reloading01)
@@ -108,7 +108,7 @@ cargo install certstream-server-rust
 Minimal:
 
 ```bash
-docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest
+docker run -d -p 8080:8080 ghcr.io/merkleye/certstream-server:latest
 ```
 
 With persistent state and connection limits:
@@ -121,7 +121,7 @@ docker run -d \
   -v certstream-state:/data \
   -e CERTSTREAM_CT_LOG_STATE_FILE=/data/state.json \
   -e CERTSTREAM_CONNECTION_LIMIT_ENABLED=true \
-  ghcr.io/reloading01/certstream-server-rust:latest
+  ghcr.io/merkleye/certstream-server:latest
 ```
 
 No configuration is required for a basic deployment. The server discovers CT logs automatically, serves WebSocket on port `8080`, and persists its position so restarts resume instead of replaying log history.
@@ -339,7 +339,7 @@ jemalloc settings can be overridden without rebuilding:
 ```bash
 docker run \
   -e _RJEM_MALLOC_CONF=dirty_decay_ms:30000,muzzy_decay_ms:30000 \
-  ghcr.io/reloading01/certstream-server-rust:latest
+  ghcr.io/merkleye/certstream-server:latest
 ```
 
 Useful allocator metrics include:
