@@ -659,3 +659,109 @@ mod tests {
         assert!(uptime < 2, "uptime should be less than 2 seconds right after creation, got {uptime}");
     }
 }
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use crate::config::{ConnectionLimitConfig, StreamConfig};
+    use crate::middleware::ConnectionLimiter;
+    use crate::models::{Extensions, LeafCert, Source, Subject};
+    use crate::websocket::{AppState, ConnectionCounter};
+    use axum::extract::Path;
+    use tokio::sync::broadcast;
+
+    fn api_state() -> Arc<ApiState> {
+        let (tx, _rx) = broadcast::channel(16);
+        let ws_state = Arc::new(AppState {
+            tx,
+            connections: ConnectionCounter::new(),
+            limiter: ConnectionLimiter::new(ConnectionLimitConfig::default(), None),
+            streams: Arc::new(StreamConfig::default()),
+            stats: Arc::new(ServerStats::new()),
+        });
+        Arc::new(ApiState {
+            stats: Arc::new(ServerStats::new()),
+            cache: Arc::new(CertificateCache::new(10)),
+            log_tracker: Arc::new(LogTracker::new()),
+            ws_state,
+        })
+    }
+
+    fn dummy_cached_cert() -> CachedCert {
+        let leaf = LeafCert {
+            subject: Subject {
+                cn: Some("example.com".to_string()),
+                ..Default::default()
+            },
+            issuer: Subject::default(),
+            serial_number: "01".to_string(),
+            not_before: 0,
+            not_after: 0,
+            fingerprint: Arc::from("AA:BB:CC"),
+            sha1: "AA:BB:CC".to_string(),
+            sha256: "AA:BB:CC:DD".to_string(),
+            sha256_raw: [0u8; 32],
+            signature_algorithm: std::borrow::Cow::Borrowed("sha256"),
+            is_ca: false,
+            all_domains: smallvec::smallvec!["example.com".to_string()],
+            as_der: None,
+            extensions: Extensions::default(),
+        };
+        CachedCert {
+            leaf: Arc::new(leaf),
+            seen: 100.0,
+            source: Arc::new(Source {
+                name: Arc::from("Test Log"),
+                url: Arc::from("https://ct.example/log"),
+            }),
+            cert_index: 42,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_stats_reports_counters_and_connections() {
+        let state = api_state();
+        state.stats.messages_sent.fetch_add(5, Ordering::Relaxed);
+        state.cache.push(dummy_cached_cert());
+
+        let Json(resp) = handle_stats(State(state)).await;
+        assert_eq!(resp.throughput.messages_sent, 5);
+        assert_eq!(resp.memory.cache_entries, 1);
+        assert_eq!(resp.memory.cache_capacity, 10);
+        assert_eq!(resp.connections.total, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_logs_reports_registered_logs_by_status() {
+        let state = api_state();
+        state
+            .log_tracker
+            .register("log1".to_string(), "https://ct.example/log1".to_string(), "op".to_string());
+
+        let Json(resp) = handle_logs(State(state)).await;
+        assert_eq!(resp.total_logs, 1);
+        assert_eq!(resp.healthy, 1);
+        assert_eq!(resp.degraded, 0);
+        assert_eq!(resp.unhealthy, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_cert_returns_the_cert_for_a_known_hash() {
+        let state = api_state();
+        state.cache.push(dummy_cached_cert());
+
+        let response = handle_cert(State(state), Path("AABBCCDD".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handle_cert_404s_for_an_unknown_hash() {
+        let state = api_state();
+        let response = handle_cert(State(state), Path("does-not-exist".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
