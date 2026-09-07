@@ -12,9 +12,16 @@ on:
 permissions: {}
 
 jobs:
+  # This repo (Merkleye/certstream-server) is itself a GitHub-level fork of
+  # the upstream certstream-server-rust project, so
+  # `head.repo.fork` is `true` for every PR here regardless of where its
+  # branch actually lives -- that flag reports whether *this* repo is a
+  # fork of something, not whether the PR's head repo differs from it. Compare
+  # full_names instead, the same check certspotter/dnstwist's copy of this
+  # workflow doesn't need since neither of those repos is itself a fork.
   publish-preview:
     name: Publish PR preview image
-    if: github.event.action != 'closed' && github.event.pull_request.head.repo.fork == false
+    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -91,7 +98,7 @@ jobs:
 
   fork-preview-note:
     name: Preview publish unavailable for fork PRs
-    if: github.event.action != 'closed' && github.event.pull_request.head.repo.fork == true
+    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
