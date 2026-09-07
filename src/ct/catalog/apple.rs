@@ -36,3 +36,40 @@ impl SignedCatalog for Apple {
         Err(VerifyError::BadSignature)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_itself_as_apple() {
+        assert_eq!(Apple.name(), "apple");
+    }
+
+    #[test]
+    fn is_not_runtime_authoritative_by_default() {
+        assert!(!Apple.code_default_runtime_authoritative());
+    }
+
+    #[test]
+    fn list_url_points_at_apples_own_log_list() {
+        assert_eq!(
+            Apple.list_url(),
+            "https://valid.apple.com/ct/log_list/current_log_list.json"
+        );
+    }
+
+    #[test]
+    fn has_no_detached_signature_or_expected_key() {
+        assert!(Apple.sig_url().is_none());
+        assert!(Apple.expected_key_fingerprint().is_none());
+    }
+
+    #[test]
+    fn verify_always_fails_defensively() {
+        assert!(matches!(
+            Apple.verify(b"anything", b"anything"),
+            Err(VerifyError::BadSignature)
+        ));
+    }
+}

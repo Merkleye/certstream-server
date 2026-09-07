@@ -1,0 +1,28 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    ["@semantic-release/commit-analyzer", { "preset": "conventionalcommits" }],
+    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
+    "./scripts/semantic-release-image-links.cjs",
+    ["@semantic-release/exec", { "prepareCmd": "scripts/release-image.sh ${nextRelease.version}" }],
+    "@semantic-release/changelog",
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [{ "path": "sbom/*.spdx.json", "label": "SBOM: ${basename}" }],
+        "successComment": false,
+        "failComment": false,
+        "failTitle": false,
+        "labels": false
+      }
+    ]
+  ]
+}

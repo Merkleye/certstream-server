@@ -189,3 +189,217 @@ fn update_sse_metrics() {
 pub fn sse_connection_count() -> u64 {
     SSE_CONNECTION_COUNT.load(Ordering::Relaxed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ServerStats;
+    use crate::config::{ConnectionLimitConfig, StreamConfig};
+    use crate::models::PreSerializedMessage;
+    use crate::websocket::{AppState, ConnectionCounter};
+    use axum::extract::ws::Utf8Bytes;
+    use axum::extract::{ConnectInfo, Query, State};
+    use futures_util::stream;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::sync::broadcast;
+
+    fn addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
+    }
+
+    fn app_state(streams: StreamConfig) -> Arc<AppState> {
+        let (tx, _rx) = broadcast::channel(16);
+        Arc::new(AppState {
+            tx,
+            connections: ConnectionCounter::new(),
+            limiter: ConnectionLimiter::new(ConnectionLimitConfig::default(), None),
+            streams: Arc::new(streams),
+            stats: Arc::new(ServerStats::new()),
+        })
+    }
+
+    fn message() -> Arc<PreSerializedMessage> {
+        Arc::new(PreSerializedMessage {
+            full: Utf8Bytes::from_static(r#"{"stream":"full"}"#),
+            lite: Utf8Bytes::from_static(r#"{"stream":"lite"}"#),
+            domains_only: Utf8Bytes::from_static(r#"{"stream":"domains"}"#),
+        })
+    }
+
+    #[test]
+    fn stream_type_from_str() {
+        assert!(matches!(SseStreamType::from_str("full"), SseStreamType::Full));
+        assert!(matches!(SseStreamType::from_str("domains"), SseStreamType::DomainsOnly));
+        assert!(matches!(
+            SseStreamType::from_str("domains-only"),
+            SseStreamType::DomainsOnly
+        ));
+        assert!(matches!(SseStreamType::from_str("lite"), SseStreamType::Lite));
+        assert!(matches!(SseStreamType::from_str("anything-else"), SseStreamType::Lite));
+        assert!(matches!(SseStreamType::from_str(""), SseStreamType::Lite));
+    }
+
+    #[test]
+    fn process_message_selects_the_requested_stream_and_counts_bytes() {
+        let msg = message();
+        let counter = AtomicU64::new(0);
+
+        let full = process_message(msg.clone(), SseStreamType::Full, &counter).unwrap();
+        assert!(matches!(full, Ok(_)));
+        assert_eq!(counter.load(Ordering::Relaxed), msg.full.len() as u64);
+
+        let before = counter.load(Ordering::Relaxed);
+        let _ = process_message(msg.clone(), SseStreamType::Lite, &counter).unwrap();
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            before + msg.lite.len() as u64
+        );
+
+        let before = counter.load(Ordering::Relaxed);
+        let expected_len = msg.domains_only.len() as u64;
+        let _ = process_message(msg, SseStreamType::DomainsOnly, &counter).unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed), before + expected_len);
+    }
+
+    #[tokio::test]
+    async fn handle_sse_stream_rejects_over_the_connection_limit() {
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState {
+            tx,
+            connections: ConnectionCounter::new(),
+            // The limiter no-ops (try_acquire always true) unless enabled,
+            // so a default config could never actually reject anything.
+            limiter: ConnectionLimiter::new(
+                ConnectionLimitConfig {
+                    enabled: true,
+                    max_connections: 1,
+                    per_ip_limit: None,
+                },
+                None,
+            ),
+            streams: Arc::new(StreamConfig::default()),
+            stats: Arc::new(ServerStats::new()),
+        });
+        // Exhaust the single connection slot before the handler ever gets a
+        // chance.
+        let ip = addr().ip();
+        assert!(state.limiter.try_acquire(ip));
+        assert!(!state.limiter.try_acquire(ip));
+
+        let response = handle_sse_stream(
+            Query(SseQueryParams { stream: None }),
+            State(state),
+            ConnectInfo(addr()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn handle_sse_stream_404s_for_a_disabled_stream() {
+        let state = app_state(StreamConfig {
+            full: false,
+            lite: true,
+            domains_only: true,
+        });
+
+        let response = handle_sse_stream(
+            Query(SseQueryParams {
+                stream: Some("full".to_string()),
+            }),
+            State(state),
+            ConnectInfo(addr()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handle_sse_stream_succeeds_for_an_enabled_stream() {
+        let state = app_state(StreamConfig::default());
+
+        let response = handle_sse_stream(
+            Query(SseQueryParams {
+                stream: Some("lite".to_string()),
+            }),
+            State(state),
+            ConnectInfo(addr()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn wrapper_flushes_pending_bytes_and_releases_its_slot_on_drop() {
+        // Enabled, or try_acquire/current_connections are both no-ops (see
+        // ConnectionLimiter::try_acquire's `if !config.enabled` short
+        // circuit) and this test would prove nothing.
+        let limiter = ConnectionLimiter::new(
+            ConnectionLimitConfig {
+                enabled: true,
+                max_connections: 10,
+                per_ip_limit: None,
+            },
+            None,
+        );
+        let ip = addr().ip();
+        assert!(limiter.try_acquire(ip));
+        assert_eq!(limiter.current_connections(), 1);
+
+        let stats = Arc::new(ServerStats::new());
+        let pending_bytes = Arc::new(AtomicU64::new(0));
+        // SSE_CONNECTION_COUNT is a process-global static that every other
+        // sse::tests case (including the real end-to-end connections in
+        // handle_socket_tests) touches too, concurrently -- cargo test runs
+        // them in parallel -- so its exact value isn't something this test
+        // can assert on without flaking. What's actually being verified
+        // here (flush-on-drop, limiter release) is test-local state, so
+        // just increment it for realism and leave it at that; the drop
+        // line that decrements it back still runs and is still covered.
+        SSE_CONNECTION_COUNT.fetch_add(1, Ordering::Relaxed);
+
+        {
+            let wrapper = SseStreamWrapper {
+                inner: Box::pin(stream::empty::<Result<Event, std::convert::Infallible>>()),
+                limiter: limiter.clone(),
+                client_ip: ip,
+                stats: stats.clone(),
+                pending_bytes: pending_bytes.clone(),
+            };
+            pending_bytes.store(123, Ordering::Relaxed);
+            drop(wrapper);
+        }
+
+        assert_eq!(stats.bytes_sent.load(Ordering::Relaxed), 123);
+        assert_eq!(limiter.current_connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn wrapper_flushes_mid_stream_once_the_threshold_is_crossed() {
+        let limiter = ConnectionLimiter::new(ConnectionLimitConfig::default(), None);
+        let ip = addr().ip();
+        assert!(limiter.try_acquire(ip));
+        let stats = Arc::new(ServerStats::new());
+        let pending_bytes = Arc::new(AtomicU64::new(0));
+
+        let mut wrapper = SseStreamWrapper {
+            inner: Box::pin(stream::once(async {
+                Ok(Event::default().data("x"))
+            })),
+            limiter,
+            client_ip: ip,
+            stats: stats.clone(),
+            pending_bytes: pending_bytes.clone(),
+        };
+        // Simulate accumulated bytes crossing FLUSH_THRESHOLD_BYTES from a
+        // previous message, then poll once to trigger the mid-stream flush.
+        pending_bytes.store(256 * 1024, Ordering::Relaxed);
+        let item = futures_util::StreamExt::next(&mut wrapper).await;
+        assert!(item.is_some());
+        assert_eq!(stats.bytes_sent.load(Ordering::Relaxed), 256 * 1024);
+        assert_eq!(pending_bytes.load(Ordering::Relaxed), 0);
+    }
+}

@@ -442,4 +442,136 @@ mod tests {
         assert!(enabled.is_enabled());
         assert!(!disabled.is_enabled());
     }
+
+    #[test]
+    fn authorize_allows_everything_when_disabled() {
+        let auth = AuthMiddleware::new(&auth_config(false, vec![]), None);
+        assert!(auth.authorize(&axum::http::HeaderMap::new()));
+    }
+
+    #[test]
+    fn authorize_checks_the_configured_header() {
+        let auth = AuthMiddleware::new(&auth_config(true, vec!["secret"]), None);
+
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!auth.authorize(&headers), "missing header must be rejected");
+
+        headers.insert("Authorization", "Bearer secret".parse().unwrap());
+        assert!(auth.authorize(&headers));
+
+        headers.insert("Authorization", "Bearer wrong".parse().unwrap());
+        assert!(!auth.authorize(&headers));
+    }
+
+    #[test]
+    fn authorize_respects_a_custom_header_name() {
+        let mut config = auth_config(true, vec!["secret"]);
+        config.header_name = "X-Api-Key".to_string();
+        let auth = AuthMiddleware::new(&config, None);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("Authorization", "Bearer secret".parse().unwrap());
+        assert!(!auth.authorize(&headers), "wrong header name must be rejected");
+
+        headers.insert("X-Api-Key", "secret".parse().unwrap());
+        assert!(auth.authorize(&headers));
+    }
+
+    // auth_middleware/rate_limit_middleware both take a `Next`, which --
+    // like WebSocketUpgrade -- has no public constructor; it's produced by
+    // axum's own router machinery. So these spin up a real in-process
+    // server with the middleware actually layered on, same pattern as
+    // websocket::server::tests::handle_socket_tests.
+    mod middleware_fn_tests {
+        use super::*;
+        use crate::config::RateLimitConfig;
+        use crate::rate_limit::RateLimiter;
+        use axum::routing::get;
+        use axum::Router;
+        use std::net::SocketAddr;
+
+        async fn spawn(router: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+                    .ok();
+            });
+            format!("http://{addr}")
+        }
+
+        #[tokio::test]
+        async fn auth_middleware_allows_a_valid_token() {
+            let auth = Arc::new(AuthMiddleware::new(&auth_config(true, vec!["secret"]), None));
+            let router = Router::new()
+                .route("/", get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(auth.clone(), auth_middleware))
+                .with_state(auth);
+            let base = spawn(router).await;
+
+            let client = reqwest::Client::new();
+            let resp = client
+                .get(&base)
+                .header("Authorization", "Bearer secret")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+        }
+
+        #[tokio::test]
+        async fn auth_middleware_rejects_a_missing_or_wrong_token() {
+            let auth = Arc::new(AuthMiddleware::new(&auth_config(true, vec!["secret"]), None));
+            let router = Router::new()
+                .route("/", get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(auth.clone(), auth_middleware))
+                .with_state(auth);
+            let base = spawn(router).await;
+
+            let client = reqwest::Client::new();
+            let resp = client.get(&base).send().await.unwrap();
+            assert_eq!(resp.status(), 401);
+
+            let resp = client
+                .get(&base)
+                .header("Authorization", "Bearer wrong")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 401);
+        }
+
+        #[tokio::test]
+        async fn rate_limit_middleware_allows_then_rejects_over_the_limit() {
+            let limiter = RateLimiter::new(
+                RateLimitConfig {
+                    enabled: true,
+                    max_tokens: 1.0,
+                    refill_rate: 0.0,
+                    burst: 1.0,
+                    window_seconds: 60,
+                    window_max_requests: 1,
+                    burst_window_seconds: 1,
+                },
+                None,
+            );
+            let router = Router::new()
+                .route("/", get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    limiter.clone(),
+                    rate_limit_middleware,
+                ))
+                .with_state(limiter);
+            let base = spawn(router).await;
+
+            let client = reqwest::Client::new();
+            let first = client.get(&base).send().await.unwrap();
+            assert_eq!(first.status(), 200);
+
+            let second = client.get(&base).send().await.unwrap();
+            assert_eq!(second.status(), 429);
+            assert!(second.headers().contains_key("retry-after"));
+        }
+    }
 }

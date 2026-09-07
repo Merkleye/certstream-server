@@ -1,0 +1,11 @@
+[tools]
+node = "22" # .github/workflows/release.yml
+
+[tasks.test]
+description = "Run the cargo test suite with a statement-coverage floor"
+run = """
+set -e
+rustup component add llvm-tools-preview
+command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+cargo llvm-cov --fail-under-lines 75
+"""

@@ -206,4 +206,108 @@ mod tests {
     fn non_cert_der_yields_none() {
         assert!(spki_sha256(b"not a certificate").is_none());
     }
+
+    /// Always-accepts stand-in for the real WebPKI verifier, so
+    /// PinnedIssuerVerifier's own pin-matching logic can be tested in
+    /// isolation from actual chain validation (which would need a live,
+    /// currently-valid certificate chain to exercise honestly).
+    #[derive(Debug)]
+    struct AlwaysOk;
+
+    impl ServerCertVerifier for AlwaysOk {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, RustlsError> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, RustlsError> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, RustlsError> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![SignatureScheme::ECDSA_NISTP256_SHA256]
+        }
+    }
+
+    fn dummy_end_entity() -> CertificateDer<'static> {
+        CertificateDer::from(
+            include_bytes!("../../../tests/fixtures/catalog/apple_issuer_ca.der").to_vec(),
+        )
+    }
+
+    fn dummy_server_name() -> ServerName<'static> {
+        ServerName::try_from("example.com").unwrap()
+    }
+
+    #[test]
+    fn verify_server_cert_accepts_when_the_pin_is_in_the_chain() {
+        let verifier = PinnedIssuerVerifier {
+            inner: Arc::new(AlwaysOk),
+            pin: APPLE_ISSUER_SPKI_SHA256,
+        };
+        let apple_ca = dummy_end_entity();
+        let result = verifier.verify_server_cert(
+            &apple_ca,
+            std::slice::from_ref(&apple_ca),
+            &dummy_server_name(),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verify_server_cert_rejects_when_the_pin_is_missing() {
+        let verifier = PinnedIssuerVerifier {
+            inner: Arc::new(AlwaysOk),
+            pin: APPLE_ISSUER_SPKI_SHA256,
+        };
+        let apple_ca = dummy_end_entity();
+        let result = verifier.verify_server_cert(
+            &apple_ca,
+            &[], // no intermediates -> pin can't be present
+            &dummy_server_name(),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn supported_verify_schemes_delegates_to_the_inner_verifier() {
+        let verifier = PinnedIssuerVerifier {
+            inner: Arc::new(AlwaysOk),
+            pin: APPLE_ISSUER_SPKI_SHA256,
+        };
+        assert_eq!(
+            verifier.supported_verify_schemes(),
+            vec![SignatureScheme::ECDSA_NISTP256_SHA256]
+        );
+    }
+
+    #[test]
+    fn build_apple_pinned_client_succeeds() {
+        let client = build_apple_pinned_client(std::time::Duration::from_secs(5), "test-agent/1.0");
+        assert!(client.is_ok(), "{:?}", client.err());
+    }
 }

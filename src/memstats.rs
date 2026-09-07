@@ -62,3 +62,50 @@ pub fn record() -> Option<HeapUsage> {
 pub fn record() -> Option<HeapUsage> {
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_heap_usage_is_zeroed() {
+        let usage = HeapUsage::default();
+        assert_eq!(usage.allocated, 0);
+        assert_eq!(usage.resident, 0);
+    }
+
+    #[test]
+    fn heap_usage_is_copy_and_debuggable() {
+        let usage = HeapUsage {
+            allocated: 42,
+            resident: 100,
+        };
+        let copied = usage;
+        assert_eq!(copied.allocated, 42);
+        assert_eq!(copied.resident, 100);
+        assert!(format!("{usage:?}").contains("42"));
+    }
+
+    // record() calls into jemalloc's mallctl interface directly (epoch,
+    // stats::*), independent of whether jemalloc is the process's
+    // #[global_allocator] -- that's only wired up in the `main` binary, not
+    // this lib target, so `cargo test --lib` exercises the same jemalloc
+    // control-plane calls production does, just against a process whose
+    // actual Rust allocations go through the system allocator instead.
+    #[cfg(not(target_env = "msvc"))]
+    #[test]
+    fn record_reads_jemalloc_stats() {
+        let usage = record().expect("jemalloc stats should be readable");
+        // jemalloc's own bookkeeping allocates something to track itself, so
+        // this should never be a bare zero in practice; the real assertion
+        // is that record() didn't return None (an epoch/stats read error).
+        let _ = usage.allocated;
+        let _ = usage.resident;
+    }
+
+    #[cfg(target_env = "msvc")]
+    #[test]
+    fn record_is_none_on_msvc() {
+        assert!(record().is_none());
+    }
+}

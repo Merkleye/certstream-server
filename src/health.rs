@@ -159,3 +159,105 @@ pub async fn example_json() -> Json<CertificateMessage> {
 
     Json(example)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConnectionLimitConfig;
+    use crate::ct::watcher::HealthStatus;
+
+    fn health_state() -> Arc<HealthState> {
+        Arc::new(HealthState {
+            log_tracker: Arc::new(LogTracker::new()),
+            limiter: ConnectionLimiter::new(ConnectionLimitConfig::default(), None),
+            started_at: std::time::Instant::now(),
+        })
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok() {
+        assert_eq!(health().await, "OK");
+    }
+
+    #[tokio::test]
+    async fn deep_health_is_healthy_with_no_logs() {
+        let state = health_state();
+        let (code, Json(body)) = deep_health(State(state)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body.status, "healthy");
+        assert_eq!(body.logs_total, 0);
+        assert_eq!(body.logs_healthy, 0);
+        assert_eq!(body.active_connections, 0);
+    }
+
+    #[tokio::test]
+    async fn deep_health_is_degraded_with_a_degraded_log() {
+        let state = health_state();
+        state
+            .log_tracker
+            .register("log1".to_string(), "https://ct.example/log1".to_string(), "example".to_string());
+        state
+            .log_tracker
+            .update("https://ct.example/log1", HealthStatus::Degraded, 1, 2, 0);
+
+        let (code, Json(body)) = deep_health(State(state)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body.status, "degraded");
+        assert_eq!(body.logs_degraded, 1);
+        assert_eq!(body.logs_total, 1);
+    }
+
+    #[tokio::test]
+    async fn deep_health_is_unhealthy_when_more_than_half_the_logs_are_unhealthy() {
+        let state = health_state();
+        state
+            .log_tracker
+            .register("log1".to_string(), "https://ct.example/log1".to_string(), "example".to_string());
+        state
+            .log_tracker
+            .register("log2".to_string(), "https://ct.example/log2".to_string(), "example".to_string());
+        state
+            .log_tracker
+            .update("https://ct.example/log1", HealthStatus::Unhealthy, 0, 0, 5);
+        state
+            .log_tracker
+            .update("https://ct.example/log2", HealthStatus::Unhealthy, 0, 0, 5);
+
+        let (code, Json(body)) = deep_health(State(state)).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "unhealthy");
+        assert_eq!(body.logs_unhealthy, 2);
+    }
+
+    #[tokio::test]
+    async fn deep_health_stays_healthy_when_at_most_half_the_logs_are_unhealthy() {
+        let state = health_state();
+        state
+            .log_tracker
+            .register("log1".to_string(), "https://ct.example/log1".to_string(), "example".to_string());
+        state
+            .log_tracker
+            .register("log2".to_string(), "https://ct.example/log2".to_string(), "example".to_string());
+        state
+            .log_tracker
+            .update("https://ct.example/log1", HealthStatus::Unhealthy, 0, 0, 5);
+        state
+            .log_tracker
+            .update("https://ct.example/log2", HealthStatus::Healthy, 10, 10, 0);
+
+        let (code, Json(body)) = deep_health(State(state)).await;
+        // Exactly half unhealthy doesn't clear the `unhealthy > total / 2`
+        // bar, but with one log also unhealthy this falls into "degraded",
+        // not "healthy" -- and stays a 200 either way.
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body.status, "degraded");
+    }
+
+    #[tokio::test]
+    async fn example_json_is_well_formed() {
+        let Json(msg) = example_json().await;
+        assert_eq!(msg.message_type, "certificate_update");
+        assert_eq!(msg.data.leaf_cert.subject.cn.as_deref(), Some("example.com"));
+        assert!(msg.data.chain.is_some());
+    }
+}

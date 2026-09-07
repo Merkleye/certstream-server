@@ -99,6 +99,10 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 rcgen = "0.14"
+# WebSocket client for in-process tests of handle_socket/handle_*_stream:
+# a real client is the only way to obtain a WebSocketUpgrade extractor
+# (it's tied to the actual HTTP upgrade handshake, not a plain data type).
+tokio-tungstenite = "0.24"
 
 # cargo-deb: `cargo deb` produces a package that installs the binary, the
 # systemd unit and the example config. The unit uses DynamicUser, so there is
