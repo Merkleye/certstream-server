@@ -201,6 +201,22 @@ mod tests {
         let _ = fs::remove_file(format!("{}.tmp", path));
     }
 
+    /// Polls (yielding to the runtime between checks, never blocking it)
+    /// until `path` exists, panicking after 5s. Used instead of a fixed
+    /// sleep timed to a background task's interval, since under coverage
+    /// instrumentation that task can take far longer than its own interval
+    /// to even get scheduled once.
+    async fn wait_for_file(path: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !std::path::Path::new(path).exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{path} was not written within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[test]
     fn test_new_without_file() {
         let manager = StateManager::new(None);
@@ -341,16 +357,21 @@ mod tests {
             .clone()
             .start_periodic_save(Duration::from_millis(50), cancel.clone());
 
-        // Let it run a bit
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait for at least one periodic tick to save.
+        wait_for_file(&path).await;
+        cleanup_file(&path);
 
+        // save_if_dirty() (which both the periodic tick and the shutdown
+        // flush call) only writes when the dirty flag is set, and the
+        // periodic save above already cleared it -- so re-dirty the state
+        // before cancelling, or the shutdown flush has nothing to do and
+        // the file above never reappears.
+        manager.update_index("log2", 200, 600);
         cancel.cancel();
 
-        // Give time for shutdown flush
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // State should have been saved (either periodic or shutdown flush)
-        assert!(std::path::Path::new(&path).exists());
+        // The shutdown flush should write the file back promptly once
+        // cancelled.
+        wait_for_file(&path).await;
 
         cleanup_file(&path);
     }
