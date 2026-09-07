@@ -395,4 +395,180 @@ mod tests {
         assert!(disconnected, "loop must break by MAX_CONSECUTIVE_LAGS");
         assert_eq!(consecutive_lags, lag_policy::MAX_CONSECUTIVE_LAGS);
     }
+
+    // handle_full_stream/handle_lite_stream/handle_domains_only all take a
+    // WebSocketUpgrade extractor, which (unlike Query/State/ConnectInfo) has
+    // no public constructor -- it's tied to a real HTTP upgrade handshake.
+    // So this spins up a real axum server bound to an ephemeral port, in
+    // this same test process (so it's still covered by cargo-llvm-cov,
+    // unlike tests/server_e2e.rs's separate release-binary subprocess), and
+    // drives it with a real WebSocket client.
+    mod handle_socket_tests {
+        use super::*;
+        use crate::config::ConnectionLimitConfig;
+        use axum::routing::get;
+        use axum::Router;
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        fn test_app_state(limit: ConnectionLimitConfig) -> Arc<AppState> {
+            let (tx, _rx) = broadcast::channel(16);
+            Arc::new(AppState {
+                tx,
+                connections: ConnectionCounter::new(),
+                limiter: ConnectionLimiter::new(limit, None),
+                streams: Arc::new(StreamConfig::default()),
+                stats: Arc::new(crate::api::ServerStats::new()),
+            })
+        }
+
+        /// Starts a real server with the given route wired to `state` and
+        /// returns its `ws://…` base URL. The listener task is detached
+        /// (not joined) — it runs for the process's lifetime, which is fine
+        /// for a short-lived test binary.
+        async fn spawn_server(path: &'static str, handler: axum::routing::MethodRouter<Arc<AppState>>, state: Arc<AppState>) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ephemeral port");
+            let addr = listener.local_addr().unwrap();
+            let app = Router::new().route(path, handler).with_state(state);
+            tokio::spawn(async move {
+                axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+                    .ok();
+            });
+            format!("ws://127.0.0.1:{}{}", addr.port(), path)
+        }
+
+        /// Reads frames until it finds a Text frame with the given content,
+        /// skipping anything else. `ping_interval`/`heartbeat_interval`
+        /// both fire on their *first* tick immediately (tokio::interval's
+        /// documented behavior), so a fresh connection sees a Ping and a
+        /// heartbeat Text frame before whatever this test actually
+        /// published -- skipping other Text frames too is what makes this
+        /// robust to that, rather than asserting on frame position.
+        async fn recv_text(
+            ws: &mut (impl futures_util::Stream<
+                Item = Result<ClientMessage, tokio_tungstenite::tungstenite::Error>,
+            > + Unpin),
+            expected: &str,
+        ) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                assert!(remaining > Duration::ZERO, "never saw {expected:?} within 5s");
+                let frame = tokio::time::timeout(remaining, ws.next())
+                    .await
+                    .expect("no message within deadline")
+                    .expect("stream ended")
+                    .expect("frame error");
+                if let ClientMessage::Text(text) = &frame
+                    && text.as_str() == expected
+                {
+                    return;
+                }
+            }
+        }
+
+        fn dummy_message() -> Arc<PreSerializedMessage> {
+            Arc::new(PreSerializedMessage {
+                full: Utf8Bytes::from_static(r#"{"stream":"full"}"#),
+                lite: Utf8Bytes::from_static(r#"{"stream":"lite"}"#),
+                domains_only: Utf8Bytes::from_static(r#"{"stream":"domains"}"#),
+            })
+        }
+
+        #[tokio::test]
+        async fn lite_stream_delivers_a_broadcast_message() {
+            let state = test_app_state(ConnectionLimitConfig::default());
+            let url = spawn_server("/", get(handle_lite_stream), state.clone()).await;
+
+            let (mut ws, response) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("handshake");
+            assert_eq!(response.status(), 101);
+
+            // Give the server task a moment to reach `state.tx.subscribe()`
+            // before publishing, or the message would have nowhere to go.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state.tx.send(dummy_message()).ok();
+
+            recv_text(&mut ws, r#"{"stream":"lite"}"#).await;
+
+            ws.close(None).await.ok();
+        }
+
+        #[tokio::test]
+        async fn full_stream_delivers_the_full_payload() {
+            let state = test_app_state(ConnectionLimitConfig::default());
+            let url = spawn_server("/", get(handle_full_stream), state.clone()).await;
+
+            let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.expect("handshake");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state.tx.send(dummy_message()).ok();
+
+            recv_text(&mut ws, r#"{"stream":"full"}"#).await;
+            ws.close(None).await.ok();
+        }
+
+        #[tokio::test]
+        async fn domains_only_stream_delivers_the_domains_payload() {
+            let state = test_app_state(ConnectionLimitConfig::default());
+            let url = spawn_server("/", get(handle_domains_only), state.clone()).await;
+
+            let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.expect("handshake");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state.tx.send(dummy_message()).ok();
+
+            recv_text(&mut ws, r#"{"stream":"domains"}"#).await;
+            ws.close(None).await.ok();
+        }
+
+        #[tokio::test]
+        async fn connection_limit_rejects_the_upgrade() {
+            let state = test_app_state(ConnectionLimitConfig {
+                enabled: true,
+                max_connections: 0,
+                per_ip_limit: None,
+            });
+            let url = spawn_server("/", get(handle_lite_stream), state).await;
+
+            let err = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect_err("handshake should be rejected");
+            match err {
+                tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                    assert_eq!(resp.status(), 429);
+                }
+                other => panic!("expected an HTTP error response, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn client_close_disconnects_and_releases_the_slot() {
+            let state = test_app_state(ConnectionLimitConfig {
+                enabled: true,
+                max_connections: 10,
+                per_ip_limit: None,
+            });
+            let url = spawn_server("/", get(handle_lite_stream), state.clone()).await;
+
+            let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.expect("handshake");
+            // Let the server-side task register the connection.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(state.connections.total(), 1);
+
+            ws.send(ClientMessage::Close(None)).await.ok();
+            drop(ws);
+
+            // The server-side disconnect (limiter release, counter
+            // decrement) happens asynchronously after the close frame is
+            // processed.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while state.connections.total() != 0 {
+                assert!(tokio::time::Instant::now() < deadline, "connection never cleaned up");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(state.limiter.current_connections(), 0);
+        }
+    }
 }
