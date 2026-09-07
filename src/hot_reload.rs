@@ -299,4 +299,53 @@ auth:
 
         let _ = std::fs::remove_file(&dir);
     }
+
+    #[test]
+    fn start_watching_is_a_no_op_with_no_config_path() {
+        let manager = HotReloadManager::new(make_default_config());
+        // Must not panic and must not spawn a watcher thread; nothing to
+        // assert on directly, but a hang here would fail the test via the
+        // harness's own timeout.
+        manager.start_watching(None, CancellationToken::new());
+    }
+
+    #[test]
+    fn start_watching_is_a_no_op_when_the_file_does_not_exist() {
+        let manager = HotReloadManager::new(make_default_config());
+        manager.start_watching(
+            Some("/tmp/certstream_start_watching_missing_xyz.yaml".to_string()),
+            CancellationToken::new(),
+        );
+    }
+
+    #[test]
+    fn start_watching_reloads_on_file_modification() {
+        let dir = std::env::temp_dir().join("certstream_test_start_watching.yaml");
+        std::fs::write(&dir, "auth:\n  enabled: false\n").unwrap();
+
+        let manager = HotReloadManager::new(make_default_config());
+        let cancel = CancellationToken::new();
+        manager.clone().start_watching(Some(dir.to_str().unwrap().to_string()), cancel.clone());
+
+        // Give the watcher thread time to register the watch before the
+        // write below, or the modification event could be missed entirely.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(&dir, "auth:\n  enabled: true\n  tokens: [\"reloaded\"]\n").unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if manager.get().auth.enabled {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "config was never hot-reloaded from the file change"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(manager.get().auth.tokens, vec!["reloaded".to_string()]);
+
+        cancel.cancel();
+        let _ = std::fs::remove_file(&dir);
+    }
 }
