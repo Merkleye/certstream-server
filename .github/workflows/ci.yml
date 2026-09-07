@@ -11,7 +11,11 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: ghcr.io/reloading01/certstream-server-rust
+  # Published under the Merkleye org rather than upstream reloading01's —
+  # this is Merkleye's own build/publish of certstream-server-rust, consumed
+  # by merkleye/merkleye's deploy/docker-compose.yml and CI as the primary
+  # firehose sidecar (see that repo's docs/OPERATIONS.md and sidecars/certstream/README.md).
+  DOCKER_IMAGE: ghcr.io/merkleye/certstream-server
 
 # Pushing twice in quick succession used to leave two multi-platform image
 # builds running against the same ref, each taking about two hours to produce
@@ -82,7 +86,10 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          # The default token, not a personal GHCR_TOKEN: this now pushes to
+          # this same repo's own org package (ghcr.io/merkleye/...), which
+          # GITHUB_TOKEN's packages: write permission above already covers.
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
