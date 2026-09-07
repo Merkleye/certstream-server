@@ -18,7 +18,16 @@ pub struct CliArgs {
 
 impl CliArgs {
     pub fn parse() -> Self {
-        let args: Vec<String> = env::args().collect();
+        Self::parse_from(env::args())
+    }
+
+    /// Parses from an arbitrary argument sequence (`args()[0]` is the
+    /// program name, same convention as `env::args()`, though every flag
+    /// check below simply scans for the flag anywhere in it). Split out
+    /// from `parse()` so tests can supply args directly instead of the
+    /// real process's.
+    fn parse_from(args: impl IntoIterator<Item = String>) -> Self {
+        let args: Vec<String> = args.into_iter().collect();
 
         Self {
             validate_config: args.iter().any(|a| a == "--validate-config"),
@@ -57,5 +66,103 @@ impl CliArgs {
 
     pub fn print_version() {
         println!("certstream-server-rust {}", VERSION);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(flags: &[&str]) -> Vec<String> {
+        std::iter::once("certstream-server-rust".to_string())
+            .chain(flags.iter().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn no_flags_are_all_false() {
+        let parsed = CliArgs::parse_from(args(&[]));
+        assert!(!parsed.validate_config);
+        assert!(!parsed.dry_run);
+        assert!(!parsed.export_metrics);
+        assert!(!parsed.show_version);
+        assert!(!parsed.show_help);
+    }
+
+    #[test]
+    fn validate_config_flag() {
+        assert!(CliArgs::parse_from(args(&["--validate-config"])).validate_config);
+    }
+
+    #[test]
+    fn dry_run_flag() {
+        assert!(CliArgs::parse_from(args(&["--dry-run"])).dry_run);
+    }
+
+    #[test]
+    fn export_metrics_flag() {
+        assert!(CliArgs::parse_from(args(&["--export-metrics"])).export_metrics);
+    }
+
+    #[test]
+    fn version_flag_long_and_short() {
+        assert!(CliArgs::parse_from(args(&["--version"])).show_version);
+        assert!(CliArgs::parse_from(args(&["-V"])).show_version);
+    }
+
+    #[test]
+    fn help_flag_long_and_short() {
+        assert!(CliArgs::parse_from(args(&["--help"])).show_help);
+        assert!(CliArgs::parse_from(args(&["-h"])).show_help);
+    }
+
+    #[test]
+    fn multiple_flags_combine() {
+        let parsed = CliArgs::parse_from(args(&["--dry-run", "--validate-config"]));
+        assert!(parsed.dry_run);
+        assert!(parsed.validate_config);
+        assert!(!parsed.export_metrics);
+    }
+
+    #[test]
+    fn unknown_args_are_ignored() {
+        let parsed = CliArgs::parse_from(args(&["--not-a-real-flag", "positional"]));
+        assert!(!parsed.validate_config);
+        assert!(!parsed.dry_run);
+        assert!(!parsed.export_metrics);
+        assert!(!parsed.show_version);
+        assert!(!parsed.show_help);
+    }
+
+    #[test]
+    fn parse_reads_the_real_process_args() {
+        // Doesn't control the test binary's own argv, so this only checks
+        // parse() actually delegates to parse_from() rather than
+        // duplicating its logic (e.g. it shouldn't panic, and its result
+        // should be independently reproducible from env::args() directly).
+        let parsed = CliArgs::parse();
+        let expected = CliArgs::parse_from(env::args());
+        assert_eq!(parsed.validate_config, expected.validate_config);
+        assert_eq!(parsed.dry_run, expected.dry_run);
+        assert_eq!(parsed.export_metrics, expected.export_metrics);
+        assert_eq!(parsed.show_version, expected.show_version);
+        assert_eq!(parsed.show_help, expected.show_help);
+    }
+
+    #[test]
+    fn version_constant_matches_cargo_package_version() {
+        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+        assert!(DEFAULT_USER_AGENT.starts_with("certstream-server-rust/"));
+        assert!(DEFAULT_USER_AGENT.ends_with(VERSION));
+    }
+
+    #[test]
+    fn print_help_does_not_panic() {
+        CliArgs::print_help();
+    }
+
+    #[test]
+    fn print_version_does_not_panic() {
+        CliArgs::print_version();
     }
 }
