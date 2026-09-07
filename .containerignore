@@ -1,0 +1,32 @@
+# Keeps the build context small and the image reproducible from source: the
+# Dockerfile only ever COPYs Cargo.toml, Cargo.lock and src/, so nothing
+# else here is needed inside the image. target/ in particular can be
+# gigabytes of local build artifacts that must never be sent as context.
+.git
+.github
+.gitignore
+.gitattributes
+*.md
+LICENSE
+target
+tests
+fuzz
+docs
+grafana
+packaging
+soak
+install.sh
+config.example.yaml
+docker-compose.yml
+docker-compose.soak.yml
+prometheus.yml
+node_modules
+package.json
+package-lock.json
+.releaserc.json
+mise.toml
+scripts
+.containerignore
+.dockerignore
+Containerfile
+Dockerfile
