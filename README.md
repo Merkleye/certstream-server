@@ -363,6 +363,16 @@ Measured against v1.5.2 on the same host with the default configuration, 100 con
 
 Certificate payloads are serialized once and shared across subscribers. Serialization is skipped when there are no subscribers. Catch-up fetches are pipelined per watcher without increasing the configured per-operator request rate.
 
+## Testing
+
+`mise run test` runs `cargo llvm-cov` over the full test suite (unit tests
+plus `tests/*.rs` integration tests) with a statement-coverage floor gate.
+The floor is a ratchet at the current achieved level, not 100% — the
+remaining gap is mostly `main.rs`'s process/signal-handling glue and the
+live CT-log-fetch loops in `ct/watcher.rs` and `ct/static_ct.rs`, which
+would need substantially more mocking work to close. CI runs this on
+every pull request.
+
 ## Certificate Transparency logs
 
 The server monitors Chrome- and Apple-trusted CT logs. Examples include:
