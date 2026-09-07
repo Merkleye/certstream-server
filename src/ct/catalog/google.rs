@@ -41,6 +41,36 @@ impl SignedCatalog for GoogleV3Usable {
     }
 }
 
+#[cfg(test)]
+mod usable_tests {
+    use super::*;
+
+    #[test]
+    fn identity_and_urls() {
+        let catalog = GoogleV3Usable;
+        assert_eq!(catalog.name(), "google_v3_usable");
+        assert!(catalog.code_default_runtime_authoritative());
+        assert_eq!(
+            catalog.list_url(),
+            "https://www.gstatic.com/ct/log_list/v3/log_list.json"
+        );
+        assert_eq!(
+            catalog.sig_url(),
+            Some("https://www.gstatic.com/ct/log_list/v3/log_list.sig")
+        );
+        assert_eq!(
+            catalog.expected_key_fingerprint(),
+            Some(GOOGLE_V3_FINGERPRINT16)
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_bogus_signature() {
+        let catalog = GoogleV3Usable;
+        assert!(catalog.verify(b"some log list bytes", b"not a real signature").is_err());
+    }
+}
+
 pub struct GoogleV3All;
 
 impl SignedCatalog for GoogleV3All {
@@ -61,5 +91,35 @@ impl SignedCatalog for GoogleV3All {
     }
     fn verify(&self, bytes: &[u8], sig: &[u8]) -> Result<(), VerifyError> {
         verify_rsa_sha256_pem(GOOGLE_V3_PUBKEY_PEM, bytes, sig)
+    }
+}
+
+#[cfg(test)]
+mod all_tests {
+    use super::*;
+
+    #[test]
+    fn identity_and_urls() {
+        let catalog = GoogleV3All;
+        assert_eq!(catalog.name(), "google_v3_all");
+        assert!(!catalog.code_default_runtime_authoritative());
+        assert_eq!(
+            catalog.list_url(),
+            "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
+        );
+        assert_eq!(
+            catalog.sig_url(),
+            Some("https://www.gstatic.com/ct/log_list/v3/all_logs_list.sig")
+        );
+        assert_eq!(
+            catalog.expected_key_fingerprint(),
+            Some(GOOGLE_V3_FINGERPRINT16)
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_bogus_signature() {
+        let catalog = GoogleV3All;
+        assert!(catalog.verify(b"some log list bytes", b"not a real signature").is_err());
     }
 }

@@ -243,6 +243,141 @@ mod tests {
         assert!(!effective_runtime_authoritative(&g, &failed, &empty));
     }
 
+    /// Minimal fixed-body HTTP/1.1 server, same pattern as
+    /// ct::static_ct::tests -- no mocking crate in this workspace, and
+    /// SignedCatalog::list_url()/sig_url() return &'static str, so pointing
+    /// a test catalog at it needs a real listener rather than a fake
+    /// reqwest transport.
+    async fn serve_once(body: &'static [u8], status_line: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    struct TestCatalog {
+        list_url: &'static str,
+        sig_url: Option<&'static str>,
+        verify_result: fn(&[u8], &[u8]) -> Result<(), VerifyError>,
+    }
+
+    impl SignedCatalog for TestCatalog {
+        fn name(&self) -> &'static str {
+            "test_catalog"
+        }
+        fn code_default_runtime_authoritative(&self) -> bool {
+            true
+        }
+        fn list_url(&self) -> &'static str {
+            self.list_url
+        }
+        fn sig_url(&self) -> Option<&'static str> {
+            self.sig_url
+        }
+        fn expected_key_fingerprint(&self) -> Option<&'static str> {
+            Some("deadbeefdeadbeef")
+        }
+        fn verify(&self, bytes: &[u8], sig: &[u8]) -> Result<(), VerifyError> {
+            (self.verify_result)(bytes, sig)
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_and_verify_with_no_sig_url_is_unverified_but_ok() {
+        let base = serve_once(b"log list bytes", "HTTP/1.1 200 OK").await;
+        let catalog = TestCatalog {
+            list_url: Box::leak(base.into_boxed_str()),
+            sig_url: None,
+            verify_result: |_, _| Ok(()),
+        };
+        let client = Client::new();
+        let fetch = fetch_and_verify(&client, &catalog).await.unwrap();
+        assert_eq!(fetch.raw_bytes, b"log list bytes");
+        assert!(!fetch.verified);
+        assert!(!fetch.verifier_present);
+    }
+
+    #[tokio::test]
+    async fn fetch_and_verify_with_a_passing_signature() {
+        let list_base = serve_once(b"log list bytes", "HTTP/1.1 200 OK").await;
+        let sig_base = serve_once(b"sig bytes", "HTTP/1.1 200 OK").await;
+        let catalog = TestCatalog {
+            list_url: Box::leak(list_base.into_boxed_str()),
+            sig_url: Some(Box::leak(sig_base.into_boxed_str())),
+            verify_result: |_, _| Ok(()),
+        };
+        let client = Client::new();
+        let fetch = fetch_and_verify(&client, &catalog).await.unwrap();
+        assert!(fetch.verified);
+        assert!(fetch.verifier_present);
+    }
+
+    #[tokio::test]
+    async fn fetch_and_verify_with_a_failing_signature() {
+        let list_base = serve_once(b"log list bytes", "HTTP/1.1 200 OK").await;
+        let sig_base = serve_once(b"sig bytes", "HTTP/1.1 200 OK").await;
+        let catalog = TestCatalog {
+            list_url: Box::leak(list_base.into_boxed_str()),
+            sig_url: Some(Box::leak(sig_base.into_boxed_str())),
+            verify_result: |_, _| Err(VerifyError::BadSignature),
+        };
+        let client = Client::new();
+        let fetch = fetch_and_verify(&client, &catalog).await.unwrap();
+        // Bytes are still returned (audit visibility) even though the
+        // signature failed -- forcing non-authoritative, not dropping data.
+        assert_eq!(fetch.raw_bytes, b"log list bytes");
+        assert!(!fetch.verified);
+        assert!(fetch.verifier_present);
+    }
+
+    #[tokio::test]
+    async fn fetch_and_verify_surfaces_an_http_error_fetching_the_list() {
+        let base = serve_once(b"not found", "HTTP/1.1 404 Not Found").await;
+        let catalog = TestCatalog {
+            list_url: Box::leak(base.into_boxed_str()),
+            sig_url: None,
+            verify_result: |_, _| Ok(()),
+        };
+        let client = Client::new();
+        let result = fetch_and_verify(&client, &catalog).await;
+        assert!(matches!(
+            result,
+            Err(CatalogFetchError::Http { what: "log list", .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_and_verify_surfaces_an_http_error_fetching_the_signature() {
+        let list_base = serve_once(b"log list bytes", "HTTP/1.1 200 OK").await;
+        let sig_base = serve_once(b"nope", "HTTP/1.1 500 Internal Server Error").await;
+        let catalog = TestCatalog {
+            list_url: Box::leak(list_base.into_boxed_str()),
+            sig_url: Some(Box::leak(sig_base.into_boxed_str())),
+            verify_result: |_, _| Ok(()),
+        };
+        let client = Client::new();
+        let result = fetch_and_verify(&client, &catalog).await;
+        assert!(matches!(
+            result,
+            Err(CatalogFetchError::Http { what: "signature", .. })
+        ));
+    }
+
     #[test]
     fn google_all_non_authoritative_until_overridden() {
         let g = GoogleV3All;
