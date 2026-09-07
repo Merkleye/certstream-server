@@ -1286,3 +1286,27 @@ streams:
         assert!(streams.domains_only);
     }
 }
+
+#[cfg(test)]
+mod checkpoint_signature_mode_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_warn_and_enforce_case_insensitively_and_trimmed() {
+        assert!(matches!(
+            CheckpointSignatureMode::from_str(" Warn "),
+            Ok(CheckpointSignatureMode::Warn)
+        ));
+        assert!(matches!(
+            CheckpointSignatureMode::from_str("ENFORCE"),
+            Ok(CheckpointSignatureMode::Enforce)
+        ));
+    }
+
+    #[test]
+    fn rejects_anything_else() {
+        assert!(CheckpointSignatureMode::from_str("strict").is_err());
+        assert!(CheckpointSignatureMode::from_str("").is_err());
+    }
+}
